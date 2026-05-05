@@ -1,0 +1,6 @@
+export enum AnalysisStatus {
+  RECEBIDO = 'RECEBIDO',
+  EM_PROCESSAMENTO = 'EM_PROCESSAMENTO',
+  ANALISADO = 'ANALISADO',
+  ERRO = 'ERRO',
+}

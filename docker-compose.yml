@@ -1,0 +1,124 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fiap-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fiap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fiap}
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fiap} -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fiap-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: fiap-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-fiap}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-fiap}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fiap-net
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: apps/api-gateway/Dockerfile
+    container_name: fiap-api-gateway
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      UPLOAD_SERVICE_URL: http://upload-service:3001
+      REPORT_SERVICE_URL: http://report-service:3003
+    ports:
+      - "3000:3000"
+    depends_on:
+      - upload-service
+      - report-service
+    networks:
+      - fiap-net
+
+  upload-service:
+    build:
+      context: .
+      dockerfile: apps/upload-service/Dockerfile
+    container_name: fiap-upload-service
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      POSTGRES_DB: ${POSTGRES_DB_UPLOAD:-fiap_upload}
+    ports:
+      - "3001:3001"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - fiap-net
+
+  processing-service:
+    build:
+      context: .
+      dockerfile: apps/processing-service/Dockerfile
+    container_name: fiap-processing-service
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      POSTGRES_DB: ${POSTGRES_DB_PROCESSING:-fiap_processing}
+    ports:
+      - "3002:3002"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - fiap-net
+
+  report-service:
+    build:
+      context: .
+      dockerfile: apps/report-service/Dockerfile
+    container_name: fiap-report-service
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      POSTGRES_DB: ${POSTGRES_DB_REPORT:-fiap_report}
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - fiap-net
+
+volumes:
+  postgres_data:
+  uploads:
+
+networks:
+  fiap-net:
+    driver: bridge

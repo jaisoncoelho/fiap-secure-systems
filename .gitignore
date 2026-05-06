@@ -34,3 +34,5 @@ uploads/
 
 # Misc
 .eslintcache
+.agent-runs
+.claude

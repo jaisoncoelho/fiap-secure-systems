@@ -1,4 +1,21 @@
+# docker-compose.yml
+#
+# Development stack for FIAP Secure Systems.
+#
+# Key characteristics:
+#   - App services use Dockerfile.dev (single-stage, all devDependencies installed)
+#   - NODE_ENV=development everywhere
+#   - Source code is volume-mounted from the host for hot-reload
+#   - node_modules is kept inside the container via a named volume so that
+#     native binaries compiled inside the container are NOT overwritten by
+#     the host node_modules (which may be compiled for a different platform)
+#   - DB-backed services wait for Postgres via docker-entrypoint.dev.sh
+#   - api-gateway does NOT depend on postgres and does NOT use the entrypoint script
+
 services:
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: fiap-postgres
@@ -36,74 +53,121 @@ services:
     networks:
       - fiap-net
 
+  # ---------------------------------------------------------------------------
+  # api-gateway — stateless HTTP proxy, NO database, NO entrypoint script
+  # ---------------------------------------------------------------------------
   api-gateway:
     build:
       context: .
-      dockerfile: apps/api-gateway/Dockerfile
+      dockerfile: apps/api-gateway/Dockerfile.dev
     container_name: fiap-api-gateway
     env_file: .env
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
       UPLOAD_SERVICE_URL: http://upload-service:3001
       REPORT_SERVICE_URL: http://report-service:3003
     ports:
       - "3000:3000"
+    # api-gateway only routes to upload and report services.
+    # It does NOT talk to postgres or rabbitmq directly.
     depends_on:
       - upload-service
       - report-service
+    volumes:
+      # Mount source for hot-reload
+      - ./apps/api-gateway/src:/app/apps/api-gateway/src
+      - ./libs:/app/libs
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./tsconfig.build.json:/app/tsconfig.build.json:ro
+      - ./nest-cli.json:/app/nest-cli.json:ro
+      # Isolate node_modules inside container — prevents host/container platform mismatch
+      - api_gateway_node_modules:/app/node_modules
     networks:
       - fiap-net
 
+  # ---------------------------------------------------------------------------
+  # upload-service — uses postgres + rabbitmq, waits via entrypoint
+  # ---------------------------------------------------------------------------
   upload-service:
     build:
       context: .
-      dockerfile: apps/upload-service/Dockerfile
+      dockerfile: apps/upload-service/Dockerfile.dev
     container_name: fiap-upload-service
     env_file: .env
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
       POSTGRES_DB: ${POSTGRES_DB_UPLOAD:-fiap_upload}
     ports:
       - "3001:3001"
-    volumes:
-      - uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    volumes:
+      # Mount source for hot-reload
+      - ./apps/upload-service/src:/app/apps/upload-service/src
+      - ./libs:/app/libs
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./tsconfig.build.json:/app/tsconfig.build.json:ro
+      - ./nest-cli.json:/app/nest-cli.json:ro
+      # Isolate node_modules inside container
+      - upload_service_node_modules:/app/node_modules
+      # Shared uploads directory (also used by processing-service)
+      - uploads:/app/uploads
     networks:
       - fiap-net
 
+  # ---------------------------------------------------------------------------
+  # processing-service — uses postgres + rabbitmq, heavy system deps
+  # ---------------------------------------------------------------------------
   processing-service:
     build:
       context: .
-      dockerfile: apps/processing-service/Dockerfile
+      dockerfile: apps/processing-service/Dockerfile.dev
     container_name: fiap-processing-service
     env_file: .env
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
       POSTGRES_DB: ${POSTGRES_DB_PROCESSING:-fiap_processing}
     ports:
       - "3002:3002"
-    volumes:
-      - uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    volumes:
+      # Mount source for hot-reload
+      - ./apps/processing-service/src:/app/apps/processing-service/src
+      - ./libs:/app/libs
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./tsconfig.build.json:/app/tsconfig.build.json:ro
+      - ./nest-cli.json:/app/nest-cli.json:ro
+      # Isolate node_modules inside container (native binaries must stay in container)
+      - processing_service_node_modules:/app/node_modules
+      # Shared uploads directory
+      - uploads:/app/uploads
     networks:
       - fiap-net
 
+  # ---------------------------------------------------------------------------
+  # report-service — uses postgres + rabbitmq, waits via entrypoint
+  # ---------------------------------------------------------------------------
   report-service:
     build:
       context: .
-      dockerfile: apps/report-service/Dockerfile
+      dockerfile: apps/report-service/Dockerfile.dev
     container_name: fiap-report-service
     env_file: .env
     environment:
-      NODE_ENV: production
+      NODE_ENV: development
       POSTGRES_DB: ${POSTGRES_DB_REPORT:-fiap_report}
     ports:
       - "3003:3003"
@@ -112,13 +176,37 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    volumes:
+      # Mount source for hot-reload
+      - ./apps/report-service/src:/app/apps/report-service/src
+      - ./libs:/app/libs
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./tsconfig.build.json:/app/tsconfig.build.json:ro
+      - ./nest-cli.json:/app/nest-cli.json:ro
+      # Isolate node_modules inside container
+      - report_service_node_modules:/app/node_modules
     networks:
       - fiap-net
 
+# ---------------------------------------------------------------------------
+# Named volumes
+# ---------------------------------------------------------------------------
 volumes:
+  # Postgres data persisted across restarts
   postgres_data:
+  # Shared uploads between upload-service and processing-service
   uploads:
+  # Per-service node_modules volumes — isolates native binaries from host
+  api_gateway_node_modules:
+  upload_service_node_modules:
+  processing_service_node_modules:
+  report_service_node_modules:
 
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
 networks:
   fiap-net:
     driver: bridge

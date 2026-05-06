@@ -1,0 +1,31 @@
+# apps/api-gateway/Dockerfile.dev
+#
+# Single-stage dev image for the api-gateway.
+# api-gateway is a stateless HTTP proxy — no database, no TypeORM,
+# no RabbitMQ consumer. No entrypoint script needed.
+#
+# Hot-reload is provided by NestJS watch mode via npm run start:api-gateway.
+# Source code is mounted at runtime from the host (see docker-compose.yml),
+# so the COPY instructions here only serve as a fallback for standalone builds.
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+ENV NODE_ENV=development
+
+# Install all dependencies including devDependencies (no --omit=dev)
+# This is required for NestJS CLI, ts-node, and TypeScript watch mode.
+COPY package*.json ./
+RUN npm install && npm cache clean --force
+
+# Copy monorepo source — used when building the image standalone.
+# In docker-compose.yml these are overridden by host volume mounts.
+COPY tsconfig*.json nest-cli.json ./
+COPY apps ./apps
+COPY libs ./libs
+
+EXPOSE 3000
+
+# Hot-reload: nest start api-gateway --watch
+CMD ["npm", "run", "start:api-gateway"]

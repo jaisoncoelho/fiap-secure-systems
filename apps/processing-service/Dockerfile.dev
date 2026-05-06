@@ -1,0 +1,57 @@
+# apps/processing-service/Dockerfile.dev
+#
+# Single-stage dev image for processing-service.
+# Needs system packages for PDF/image processing (pdf2pic, sharp):
+#   Runtime: poppler-utils, graphicsmagick, ghostscript, vips
+#   Build-time (native module compilation): python3, make, g++, vips-dev
+#
+# Waits for Postgres via the shared entrypoint script before starting NestJS.
+# Hot-reload via npm run start:processing-service.
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+ENV NODE_ENV=development
+
+# Runtime packages for PDF and image processing:
+#   poppler-utils  — pdftoppm / pdftocairo used by pdf2pic to rasterize PDFs
+#   graphicsmagick — ImageMagick-compatible CLI used by pdf2pic as a fallback
+#   ghostscript    — PostScript/PDF interpreter required by graphicsmagick PDF support
+#   vips           — C library required by sharp at runtime
+# Build-time packages for compiling native Node addons (sharp uses node-gyp):
+#   python3, make, g++ — node-gyp toolchain
+#   vips-dev           — headers needed to compile the sharp native binding
+# postgresql-client   — provides pg_isready for the entrypoint health check
+RUN apk add --no-cache \
+    poppler-utils \
+    graphicsmagick \
+    ghostscript \
+    vips \
+    python3 \
+    make \
+    g++ \
+    vips-dev \
+    postgresql-client
+
+# Install all dependencies including devDependencies (no --omit=dev).
+# sharp will compile its native binding against the vips-dev headers installed above.
+COPY package*.json ./
+RUN npm install && npm cache clean --force
+
+# Copy monorepo source — overridden by host volume mounts in compose.
+COPY tsconfig*.json nest-cli.json ./
+COPY apps ./apps
+COPY libs ./libs
+
+# Shared uploads directory (also used by upload-service via named volume in compose).
+RUN mkdir -p /app/uploads
+
+# Copy the shared dev entrypoint from the monorepo infra/ directory.
+COPY infra/docker-entrypoint.dev.sh /usr/local/bin/docker-entrypoint.dev.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.dev.sh
+
+EXPOSE 3002
+
+ENTRYPOINT ["docker-entrypoint.dev.sh"]
+CMD ["npm", "run", "start:processing-service"]

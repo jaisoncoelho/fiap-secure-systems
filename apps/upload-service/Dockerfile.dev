@@ -1,0 +1,41 @@
+# apps/upload-service/Dockerfile.dev
+#
+# Single-stage dev image for upload-service.
+# Waits for Postgres via the shared entrypoint script before starting NestJS.
+#
+# Hot-reload is provided by NestJS watch mode via npm run start:upload-service.
+# Source code is mounted at runtime from the host (see docker-compose.yml).
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+ENV NODE_ENV=development
+
+# postgresql-client provides pg_isready, used by docker-entrypoint.dev.sh
+# to poll until Postgres is accepting connections.
+RUN apk add --no-cache postgresql-client
+
+# Install all dependencies including devDependencies (no --omit=dev).
+COPY package*.json ./
+RUN npm install && npm cache clean --force
+
+# Copy monorepo source — overridden by host volume mounts in compose.
+COPY tsconfig*.json nest-cli.json ./
+COPY apps ./apps
+COPY libs ./libs
+
+# Directory for uploaded files; also created by compose volume mount but
+# creating it here ensures the path exists for standalone builds.
+RUN mkdir -p /app/uploads
+
+# Copy the shared dev entrypoint from the monorepo infra/ directory.
+COPY infra/docker-entrypoint.dev.sh /usr/local/bin/docker-entrypoint.dev.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.dev.sh
+
+EXPOSE 3001
+
+# ENTRYPOINT runs the wait-for-postgres + optional migration logic.
+# CMD is passed to exec "$@" inside the entrypoint so it becomes PID 1.
+ENTRYPOINT ["docker-entrypoint.dev.sh"]
+CMD ["npm", "run", "start:upload-service"]

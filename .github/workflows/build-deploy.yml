@@ -1,0 +1,318 @@
+name: Build and Deploy Application
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "build-and-deploy"
+        type: choice
+        options:
+          - build-and-deploy
+          - deploy-only
+          - build-only
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: jaisoncoelho
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: run-tests
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.action == 'build-and-deploy' || github.event.inputs.action == 'build-only'))
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service:
+          - api-gateway
+          - upload-service
+          - processing-service
+          - report-service
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image for ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./apps/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/fiap-secure-systems-${{ matrix.service }}:latest
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy-to-k3s:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'build-and-deploy')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ vars.HETZNER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Download kubeconfig from Hetzner
+        run: |
+          scp -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }}:/etc/rancher/k3s/k3s.yaml ./kubeconfig
+          sed -i "s/127.0.0.1/${{ vars.HETZNER_HOST }}/g" kubeconfig
+          chmod 600 kubeconfig
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "v1.28.0"
+
+      - name: Ensure namespace exists
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          kubectl create namespace fiap-secure-systems --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create or update secrets
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+
+          # GitHub registry secret
+          kubectl create secret docker-registry github-registry-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GHCR_PAT }} \
+            --docker-email=${{ github.actor }}@users.noreply.github.com \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Postgres secret
+          kubectl create secret generic postgres-secret \
+            --from-literal=postgres-host="${{ vars.POSTGRES_HOST }}" \
+            --from-literal=postgres-port="${{ vars.POSTGRES_PORT }}" \
+            --from-literal=postgres-user="${{ secrets.POSTGRES_USER }}" \
+            --from-literal=postgres-password="${{ secrets.POSTGRES_PASSWORD }}" \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # RabbitMQ secret
+          kubectl create secret generic rabbitmq-secret \
+            --from-literal=rabbitmq-url="${{ secrets.RABBITMQ_URL }}" \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # App secret (API key + OpenAI)
+          kubectl create secret generic app-secret \
+            --from-literal=api-key="${{ secrets.API_KEY }}" \
+            --from-literal=openai-api-key="${{ secrets.OPENAI_API_KEY }}" \
+            --from-literal=openai-model="${{ vars.OPENAI_MODEL }}" \
+            --from-literal=openai-timeout-ms="${{ vars.OPENAI_TIMEOUT_MS }}" \
+            --from-literal=openai-max-retries="${{ vars.OPENAI_MAX_RETRIES }}" \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply Kubernetes manifests
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+
+          # Apply namespace
+          kubectl apply -f k8s/namespace.yaml
+
+          # Apply all service manifests
+          kubectl apply -f k8s/upload-service-deployment.yaml
+          kubectl apply -f k8s/processing-service-deployment.yaml
+          kubectl apply -f k8s/report-service-deployment.yaml
+          kubectl apply -f k8s/api-gateway-deployment.yaml
+
+          # Force pod restart to pull latest image
+          kubectl rollout restart deployment/api-gateway -n fiap-secure-systems
+          kubectl rollout restart deployment/upload-service -n fiap-secure-systems
+          kubectl rollout restart deployment/processing-service -n fiap-secure-systems
+          kubectl rollout restart deployment/report-service -n fiap-secure-systems
+
+      - name: Wait for rollout
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          kubectl rollout status deployment/api-gateway -n fiap-secure-systems --timeout=300s
+          kubectl rollout status deployment/upload-service -n fiap-secure-systems --timeout=300s
+          kubectl rollout status deployment/processing-service -n fiap-secure-systems --timeout=300s
+          kubectl rollout status deployment/report-service -n fiap-secure-systems --timeout=300s
+
+      - name: Verify deployment health
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=== Checking deployments ==="
+          kubectl get deployments -n fiap-secure-systems -o wide
+
+          echo "=== Checking pods ==="
+          kubectl get pods -n fiap-secure-systems -o wide
+
+          echo "=== Checking services ==="
+          kubectl get svc -n fiap-secure-systems
+
+          echo "=== Checking ingress ==="
+          kubectl get ingress -n fiap-secure-systems
+
+          echo "=== Recent events ==="
+          kubectl get events -n fiap-secure-systems --sort-by='.lastTimestamp' | tail -10
+
+      - name: Show application logs
+        if: always()
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          for svc in api-gateway upload-service processing-service report-service; do
+            echo "=== Logs: $svc (last 50 lines) ==="
+            kubectl logs -n fiap-secure-systems -l app=$svc --tail=50 --timestamps 2>/dev/null || echo "No logs available for $svc"
+          done
+
+  deploy-only:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy-only'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ vars.HETZNER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Download kubeconfig from Hetzner
+        run: |
+          scp -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }}:/etc/rancher/k3s/k3s.yaml ./kubeconfig
+          sed -i "s/127.0.0.1/${{ vars.HETZNER_HOST }}/g" kubeconfig
+          chmod 600 kubeconfig
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "v1.28.0"
+
+      - name: Ensure namespace exists
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          kubectl create namespace fiap-secure-systems --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create or update secrets
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+
+          # GitHub registry secret
+          kubectl create secret docker-registry github-registry-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GHCR_PAT }} \
+            --docker-email=${{ github.actor }}@users.noreply.github.com \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Postgres secret
+          kubectl create secret generic postgres-secret \
+            --from-literal=postgres-host="${{ vars.POSTGRES_HOST }}" \
+            --from-literal=postgres-port="${{ vars.POSTGRES_PORT }}" \
+            --from-literal=postgres-user="${{ secrets.POSTGRES_USER }}" \
+            --from-literal=postgres-password="${{ secrets.POSTGRES_PASSWORD }}" \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # RabbitMQ secret
+          kubectl create secret generic rabbitmq-secret \
+            --from-literal=rabbitmq-url="${{ secrets.RABBITMQ_URL }}" \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # App secret (API key + OpenAI)
+          kubectl create secret generic app-secret \
+            --from-literal=api-key="${{ secrets.API_KEY }}" \
+            --from-literal=openai-api-key="${{ secrets.OPENAI_API_KEY }}" \
+            --from-literal=openai-model="${{ vars.OPENAI_MODEL }}" \
+            --from-literal=openai-timeout-ms="${{ vars.OPENAI_TIMEOUT_MS }}" \
+            --from-literal=openai-max-retries="${{ vars.OPENAI_MAX_RETRIES }}" \
+            --namespace=fiap-secure-systems \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply Kubernetes manifests
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+
+          # Apply namespace
+          kubectl apply -f k8s/namespace.yaml
+
+          # Apply all service manifests
+          kubectl apply -f k8s/upload-service-deployment.yaml
+          kubectl apply -f k8s/processing-service-deployment.yaml
+          kubectl apply -f k8s/report-service-deployment.yaml
+          kubectl apply -f k8s/api-gateway-deployment.yaml
+
+          # Force pod restart to pull latest image
+          kubectl rollout restart deployment/api-gateway -n fiap-secure-systems
+          kubectl rollout restart deployment/upload-service -n fiap-secure-systems
+          kubectl rollout restart deployment/processing-service -n fiap-secure-systems
+          kubectl rollout restart deployment/report-service -n fiap-secure-systems
+
+      - name: Wait for rollout
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          kubectl rollout status deployment/api-gateway -n fiap-secure-systems --timeout=300s
+          kubectl rollout status deployment/upload-service -n fiap-secure-systems --timeout=300s
+          kubectl rollout status deployment/processing-service -n fiap-secure-systems --timeout=300s
+          kubectl rollout status deployment/report-service -n fiap-secure-systems --timeout=300s
+
+      - name: Verify deployment health
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=== Checking deployments ==="
+          kubectl get deployments -n fiap-secure-systems -o wide
+
+          echo "=== Checking pods ==="
+          kubectl get pods -n fiap-secure-systems -o wide
+
+          echo "=== Checking services ==="
+          kubectl get svc -n fiap-secure-systems
+
+          echo "=== Checking ingress ==="
+          kubectl get ingress -n fiap-secure-systems
+
+          echo "=== Recent events ==="
+          kubectl get events -n fiap-secure-systems --sort-by='.lastTimestamp' | tail -10

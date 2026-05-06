@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: processing-service
+  namespace: fiap-secure-systems
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: processing-service
+  template:
+    metadata:
+      labels:
+        app: processing-service
+    spec:
+      imagePullSecrets:
+        - name: github-registry-secret
+      containers:
+        - name: processing-service
+          image: ghcr.io/jaisoncoelho/fiap-secure-systems-processing-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3002
+          env:
+            - name: NODE_ENV
+              value: 'production'
+            - name: POSTGRES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: postgres-host
+            - name: POSTGRES_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: postgres-port
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: 'fiap_processing'
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: rabbitmq-url
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: openai-api-key
+            - name: OPENAI_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: openai-model
+            - name: OPENAI_TIMEOUT_MS
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: openai-timeout-ms
+            - name: OPENAI_MAX_RETRIES
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: openai-max-retries
+          volumeMounts:
+            - name: uploads-storage
+              mountPath: /app/uploads
+      volumes:
+        - name: uploads-storage
+          persistentVolumeClaim:
+            claimName: uploads-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: processing-service
+  namespace: fiap-secure-systems
+spec:
+  selector:
+    app: processing-service
+  ports:
+    - name: http
+      port: 3002
+      targetPort: 3002
+      protocol: TCP
+  type: ClusterIP

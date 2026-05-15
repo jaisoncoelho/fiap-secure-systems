@@ -1,0 +1,160 @@
+name: Get Application Logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: "Number of log lines to retrieve"
+        required: false
+        default: "200"
+        type: string
+      service_name:
+        description: "Service to get logs from"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - api-gateway
+          - upload-service
+          - processing-service
+          - report-service
+      include_previous:
+        description: "Include previous container logs (if crashed)"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  get-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ vars.HETZNER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Download kubeconfig from Hetzner
+        run: |
+          scp -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }}:/etc/rancher/k3s/k3s.yaml ./kubeconfig
+          sed -i "s/127.0.0.1/${{ vars.HETZNER_HOST }}/g" kubeconfig
+          chmod 600 kubeconfig
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "v1.28.0"
+
+      - name: Get Pod Status
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=========================================="
+          echo "POD STATUS"
+          echo "=========================================="
+          kubectl get pods -n fiap-secure-systems -o wide
+          echo ""
+
+          echo "=========================================="
+          echo "DEPLOYMENT STATUS"
+          echo "=========================================="
+          for svc in api-gateway upload-service processing-service report-service; do
+            echo "--- $svc ---"
+            kubectl get deployment $svc -n fiap-secure-systems -o wide 2>/dev/null || echo "Deployment $svc not found"
+          done
+          echo ""
+
+      - name: Get Pod Details
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=========================================="
+          echo "POD DETAILS"
+          echo "=========================================="
+
+          if [ "${{ inputs.service_name }}" = "all" ]; then
+            echo "Describing all application pods:"
+            for svc in api-gateway upload-service processing-service report-service; do
+              echo "--- $svc ---"
+              kubectl describe pods -l app=$svc -n fiap-secure-systems 2>/dev/null || echo "No pods found for $svc"
+              echo ""
+            done
+          else
+            echo "Describing pods for service: ${{ inputs.service_name }}"
+            kubectl describe pods -l app=${{ inputs.service_name }} -n fiap-secure-systems 2>/dev/null || echo "No pods found for ${{ inputs.service_name }}"
+          fi
+
+      - name: Get Recent Events
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=========================================="
+          echo "RECENT EVENTS (Last 20)"
+          echo "=========================================="
+          kubectl get events -n fiap-secure-systems --sort-by='.lastTimestamp' | tail -20
+
+      - name: Get Application Logs
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=========================================="
+          echo "APPLICATION LOGS (Last ${{ inputs.lines }} lines)"
+          echo "=========================================="
+
+          if [ "${{ inputs.service_name }}" = "all" ]; then
+            echo "Getting logs from all services:"
+            for svc in api-gateway upload-service processing-service report-service; do
+              echo ""
+              echo "--- $svc ---"
+              kubectl logs -l app=$svc -n fiap-secure-systems --tail=${{ inputs.lines }} --timestamps --all-containers=true 2>/dev/null || echo "No logs available for $svc"
+            done
+          else
+            echo "Getting logs from service: ${{ inputs.service_name }}"
+            kubectl logs -l app=${{ inputs.service_name }} -n fiap-secure-systems --tail=${{ inputs.lines }} --timestamps --all-containers=true 2>/dev/null || echo "No logs available for ${{ inputs.service_name }}"
+          fi
+
+      - name: Get Previous Container Logs (if crashed)
+        if: inputs.include_previous == true
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=========================================="
+          echo "PREVIOUS CONTAINER LOGS (if crashed)"
+          echo "=========================================="
+
+          if [ "${{ inputs.service_name }}" = "all" ]; then
+            for svc in api-gateway upload-service processing-service report-service; do
+              echo ""
+              echo "--- $svc (previous) ---"
+              for pod in $(kubectl get pods -n fiap-secure-systems -l app=$svc -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+                echo "Pod: $pod"
+                kubectl logs $pod -n fiap-secure-systems --previous --tail=${{ inputs.lines }} --timestamps 2>/dev/null || echo "No previous logs for $pod"
+                echo ""
+              done
+            done
+          else
+            echo "Getting previous logs from service: ${{ inputs.service_name }}"
+            for pod in $(kubectl get pods -n fiap-secure-systems -l app=${{ inputs.service_name }} -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+              echo "Pod: $pod"
+              kubectl logs $pod -n fiap-secure-systems --previous --tail=${{ inputs.lines }} --timestamps 2>/dev/null || echo "No previous logs for $pod"
+              echo ""
+            done
+          fi
+
+      - name: Get Resource Usage
+        run: |
+          export KUBECONFIG=$(pwd)/kubeconfig
+          echo "=========================================="
+          echo "RESOURCE USAGE"
+          echo "=========================================="
+          kubectl top pods -n fiap-secure-systems 2>/dev/null || echo "Metrics server not available"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "LOG RETRIEVAL COMPLETE"
+          echo "=========================================="
+          echo "Retrieved logs with the following parameters:"
+          echo "- Lines: ${{ inputs.lines }}"
+          echo "- Service: ${{ inputs.service_name }}"
+          echo "- Include previous: ${{ inputs.include_previous }}"
+          echo ""
+          echo "Tip: To see more lines or a specific service, run this workflow again with different parameters"

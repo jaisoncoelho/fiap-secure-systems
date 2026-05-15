@@ -1,0 +1,131 @@
+name: SSH Debug Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Command to run on master node (optional)"
+        required: false
+        type: string
+
+jobs:
+  ssh-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ vars.HETZNER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Check Master Node Info
+        run: |
+          echo "=========================================="
+          echo "MASTER NODE INFO"
+          echo "=========================================="
+          echo "Host: ${{ vars.HETZNER_HOST }}"
+          echo "User: cluster"
+          echo ""
+
+          echo "System Info:"
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "uname -a"
+          echo ""
+
+          echo "Uptime:"
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "uptime"
+          echo ""
+
+      - name: Check K3s Status
+        run: |
+          echo "=========================================="
+          echo "K3S STATUS"
+          echo "=========================================="
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "sudo systemctl status k3s --no-pager" || echo "K3s service not running"
+          echo ""
+
+      - name: Check Namespace and All Resources
+        run: |
+          echo "=========================================="
+          echo "FIAP-SECURE-SYSTEMS NAMESPACE OVERVIEW"
+          echo "=========================================="
+
+          echo "All pods:"
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && kubectl get pods -n fiap-secure-systems -o wide" 2>/dev/null || echo "Namespace not found or no pods"
+          echo ""
+
+          echo "All services:"
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && kubectl get svc -n fiap-secure-systems" 2>/dev/null || echo "No services found"
+          echo ""
+
+          echo "All ingress:"
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && kubectl get ingress -n fiap-secure-systems" 2>/dev/null || echo "No ingress found"
+          echo ""
+
+          echo "All deployments:"
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && kubectl get deployments -n fiap-secure-systems -o wide" 2>/dev/null || echo "No deployments found"
+          echo ""
+
+      - name: Check Service Endpoints
+        run: |
+          echo "=========================================="
+          echo "SERVICE ENDPOINTS"
+          echo "=========================================="
+
+          for svc in api-gateway upload-service processing-service report-service; do
+            echo "--- $svc ---"
+            ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && kubectl get endpoints $svc -n fiap-secure-systems" 2>/dev/null || echo "Endpoint $svc not found"
+            echo ""
+          done
+
+      - name: Check Secrets
+        run: |
+          echo "=========================================="
+          echo "SECRETS STATUS"
+          echo "=========================================="
+
+          for secret in postgres-secret rabbitmq-secret app-secret github-registry-secret; do
+            if ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && kubectl get secret $secret -n fiap-secure-systems" &>/dev/null; then
+              echo "OK $secret exists"
+            else
+              echo "MISSING $secret NOT found"
+            fi
+          done
+          echo ""
+
+      - name: Check Recent Events
+        run: |
+          echo "=========================================="
+          echo "RECENT EVENTS (Last 20)"
+          echo "=========================================="
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml && kubectl get events -n fiap-secure-systems --sort-by='.lastTimestamp' | tail -20" 2>/dev/null || echo "No events found"
+          echo ""
+
+      - name: Run Custom Command
+        if: inputs.command != ''
+        run: |
+          echo "=========================================="
+          echo "RUNNING CUSTOM COMMAND"
+          echo "=========================================="
+          echo "Command: ${{ inputs.command }}"
+          echo ""
+          ssh -i ~/.ssh/id_rsa cluster@${{ vars.HETZNER_HOST }} "${{ inputs.command }}"
+          echo ""
+
+      - name: Connection Info
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "SSH CONNECTION INFO"
+          echo "=========================================="
+          echo "To connect manually via SSH:"
+          echo ""
+          echo "  ssh cluster@${{ vars.HETZNER_HOST }}"
+          echo ""
+          echo "Then run kubectl commands:"
+          echo "  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml"
+          echo "  kubectl get pods -n fiap-secure-systems"
+          echo ""
+          echo "Or use sudo for system commands:"
+          echo "  sudo systemctl status k3s"
+          echo ""

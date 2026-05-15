@@ -24,6 +24,8 @@ spec:
           env:
             - name: NODE_ENV
               value: 'production'
+            - name: API_GATEWAY_PORT
+              value: '3000'
             - name: UPLOAD_SERVICE_URL
               value: 'http://upload-service.fiap-secure-systems.svc.cluster.local:3001'
             - name: REPORT_SERVICE_URL

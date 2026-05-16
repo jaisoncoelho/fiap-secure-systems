@@ -37,6 +37,8 @@ spec:
           env:
             - name: NODE_ENV
               value: 'production'
+            - name: UPLOAD_SERVICE_PORT
+              value: '3001'
             - name: POSTGRES_HOST
               valueFrom:
                 secretKeyRef:

@@ -24,6 +24,8 @@ spec:
           env:
             - name: NODE_ENV
               value: 'production'
+            - name: REPORT_SERVICE_PORT
+              value: '3003'
             - name: POSTGRES_HOST
               valueFrom:
                 secretKeyRef:
